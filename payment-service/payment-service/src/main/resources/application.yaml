@@ -1,0 +1,59 @@
+spring:
+  application:
+    name: payment-service
+  datasource:
+    url: jdbc:postgresql://localhost:5434/paymentdb
+    username: payment_user
+    password: payment_pass
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+  data:
+    redis:
+      host: localhost
+      port: 6380
+      password: ""
+      database: 0
+      ssl:
+        enabled: false
+  cache:
+    type: redis
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: payment-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # ErrorHandlingDeserializer wraps the JSON one: a message that isn't valid JSON is logged and
+      # skipped instead of blocking the partition forever ("poison pill")
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+        spring.json.value.default.type: com.jaka.payment_service.dto.OrderCreatedEvent
+        spring.json.trusted.packages: com.jaka.payment_service.dto
+management:
+  endpoint:
+    health:
+      show-details: always
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  metrics:
+    tags:
+      service: payment-service
+      environment: dev
+server:
+  port: 8082
+  servlet:
+    context-path: /api/payments
+logging:
+  level:
+    com.zaxxer.hikari: INFO
+    io.lettuce.core: INFO

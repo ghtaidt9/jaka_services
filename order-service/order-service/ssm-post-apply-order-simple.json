@@ -1,0 +1,13 @@
+{
+    "Parameters":  {
+                       "commands":  [
+                                        "sudo docker inspect order-service --format \"{{.Config.Image}}\"",
+                                        "curl -sS -o /dev/null -w \"HTTP %{http_code}\" --max-time 10 http://127.0.0.1:8080/api/orders/actuator/health"
+                                    ]
+                   },
+    "DocumentName":  "AWS-RunShellScript",
+    "InstanceIds":  [
+                        "i-09ba35f8b9426412a",
+                        "i-0d2bcf5d88e67b749"
+                    ]
+}

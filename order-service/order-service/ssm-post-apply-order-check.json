@@ -1,0 +1,14 @@
+{
+    "Parameters":  {
+                       "commands":  [
+                                        "sudo docker inspect order-service --format \"{{.Config.Image}}\"",
+                                        "curl -sS -o /dev/null -w \"HTTP %{http_code}`n\" --max-time 10 http://127.0.0.1:8080/api/orders/actuator/health",
+                                        "sudo docker logs order-service --tail 100 2\u003e\u00261 | grep -E \"OrderServiceApplication|PaymentServiceApplication|Started\" || true"
+                                    ]
+                   },
+    "DocumentName":  "AWS-RunShellScript",
+    "InstanceIds":  [
+                        "i-09ba35f8b9426412a",
+                        "i-0d2bcf5d88e67b749"
+                    ]
+}
