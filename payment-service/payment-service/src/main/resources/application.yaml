@@ -30,13 +30,13 @@ spring:
       group-id: payment-service
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      # ErrorHandlingDeserializer wraps the JSON one: a message that isn't valid JSON is logged and
-      # skipped instead of blocking the partition forever ("poison pill")
-      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
       properties:
-        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
-        spring.json.value.default.type: com.jaka.payment_service.dto.OrderCreatedEvent
-        spring.json.trusted.packages: com.jaka.payment_service.dto
+        enable.idempotence: true
 management:
   endpoint:
     health:
@@ -57,3 +57,5 @@ logging:
   level:
     com.zaxxer.hikari: INFO
     io.lettuce.core: INFO
+  pattern:
+    level: "%5p [cid=%X{correlationId:-}]"
