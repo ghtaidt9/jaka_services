@@ -6,22 +6,29 @@ Danh mục mọi event giữa 4 service: order, inventory, payment, notification
 
 | Event | Topic | Producer | Consumer (group) | Ý nghĩa |
 |---|---|---|---|---|
-| `OrderCreated` | `order-events` | order-service | inventory-service, notification-service | Đơn mới đã được lưu |
-| `InventoryReserved` | `inventory-events` | inventory-service | payment-service | Kho đã giữ hàng cho đơn |
-| `InventoryRejected` | `inventory-events` | inventory-service | notification-service | Không đủ hàng, đơn không thể tiếp tục |
-| `InventoryReleased` | `inventory-events` | inventory-service | — (notification bỏ qua) | Hàng đã giữ được trả lại kho (bù trừ sau `PaymentFailed`) |
-| `PaymentCompleted` | `payment-events` | payment-service | inventory-service, notification-service | Đã thu tiền |
-| `PaymentFailed` | `payment-events` | payment-service | inventory-service, notification-service | Thanh toán bị từ chối |
+| `OrderCreated` | `order-events` | order-service | inventory-service, notification-service | Đơn mới đã được lưu (`PENDING`) |
+| `OrderConfirmed` | `order-events` | order-service | — (notification bỏ qua) | Saga thành công: đơn `CONFIRMED` |
+| `OrderCancelled` | `order-events` | order-service | inventory-service | Đơn `CANCELLED` (hết hàng, thanh toán lỗi, hoặc timeout) — inventory release nếu còn giữ hàng |
+| `RefundRequested` | `order-events` | order-service | payment-service | `PaymentCompleted` đến sau khi đơn đã huỷ (timeout) → yêu cầu hoàn tiền |
+| `InventoryReserved` | `inventory-events` | inventory-service | payment-service, order-service, order-summary-projector | Kho đã giữ hàng cho đơn |
+| `InventoryRejected` | `inventory-events` | inventory-service | order-service, order-summary-projector, notification-service | Không đủ hàng, đơn không thể tiếp tục |
+| `InventoryReleased` | `inventory-events` | inventory-service | order-summary-projector | Hàng đã giữ được trả lại kho (bù trừ sau `PaymentFailed` / `OrderCancelled`) |
+| `PaymentCompleted` | `payment-events` | payment-service | inventory-service, order-service, order-summary-projector, notification-service | Đã thu tiền |
+| `PaymentFailed` | `payment-events` | payment-service | inventory-service, order-service, order-summary-projector, notification-service | Thanh toán bị từ chối |
 
 Mỗi consumer group chỉ nhận event của topic nó nghe; event không cần xử lý thì bỏ qua (không throw):
 
 | Consumer group | Nghe topic | Xử lý | Bỏ qua |
 |---|---|---|---|
-| `inventory-service` | `order-events`, `payment-events` | `OrderCreated` → reserve · `PaymentCompleted` → commit · `PaymentFailed` → release | — |
-| `payment-service` | `inventory-events` | `InventoryReserved` → charge | `InventoryRejected`, `InventoryReleased` |
-| `notification-service` | cả 3 topic | `OrderCreated`, `InventoryRejected`, `PaymentCompleted`, `PaymentFailed` → gửi mail | `InventoryReserved`, `InventoryReleased` |
+| `order-service` (Saga) | `inventory-events`, `payment-events` | `InventoryReserved` → `AWAITING_PAYMENT` · `InventoryRejected`, `PaymentFailed` → `CANCELLED` + `OrderCancelled` · `PaymentCompleted` → `CONFIRMED` + `OrderConfirmed` (đơn đã `CANCELLED` → `RefundRequested`) | `InventoryReleased` |
+| `order-summary-projector` | `inventory-events`, `payment-events` | Mọi event → cập nhật read model `order_summary` | — |
+| `inventory-service` | `order-events`, `payment-events` | `OrderCreated` → reserve · `PaymentCompleted` → commit · `PaymentFailed`, `OrderCancelled` → release | `OrderConfirmed`, `RefundRequested` |
+| `payment-service` | `inventory-events`, `order-events` | `InventoryReserved` → charge · `RefundRequested` → refund | `InventoryRejected`, `InventoryReleased`, các event `Order*` |
+| `notification-service` | cả 3 topic | `OrderCreated`, `InventoryRejected`, `PaymentCompleted`, `PaymentFailed` → gửi mail | `InventoryReserved`, `InventoryReleased`, `OrderConfirmed`, `OrderCancelled`, `RefundRequested` |
 
 ## 2. Luồng
+
+### 2a. Luồng chính
 
 ```
 order-svc ──OrderCreated──► order-events ──► inventory-svc: reserve
@@ -30,7 +37,21 @@ order-svc ──OrderCreated──► order-events ──► inventory-svc: rese
                                               │                                                       └─ lỗi → PaymentFailed    ─► payment-events ──► inventory-svc: release
                                               │                                                                                                        └─ InventoryReleased ─► inventory-events
                                               └─ thiếu hàng → InventoryRejected ─► inventory-events
+
 notification-svc nghe cả 3 topic và gửi mail cho OrderCreated, InventoryRejected, PaymentCompleted, PaymentFailed
+```
+
+### 2b. Saga ở order-svc
+
+```
+                         ┌─ InventoryReserved ─► AWAITING_PAYMENT
+inventory-events ──┐     ├─ InventoryRejected ─► CANCELLED ─► OrderCancelled
+                   ├──► order-svc
+payment-events  ───┘     ├─ PaymentFailed     ─► CANCELLED ─► OrderCancelled
+                         └─ PaymentCompleted ─┬─ đang AWAITING_PAYMENT ─► CONFIRMED ─► OrderConfirmed
+                                              └─ đã CANCELLED (timeout) ─► RefundRequested ─► payment-svc: refund
+
+job timeout (5 phút, AWAITING_PAYMENT) ─► CANCELLED (PAYMENT_TIMEOUT) ─► OrderCancelled ─► inventory-svc: release
 ```
 
 ## 3. Quy ước chung

@@ -5,6 +5,7 @@ import java.time.LocalDateTime;
 import java.util.UUID;
 
 import com.jaka.order_service.dto.CreateOrderRequest;
+import com.jaka.order_service.enums.OrderStatus;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -14,6 +15,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -61,11 +63,17 @@ public class Order {
     @Column(nullable = false)
     private LocalDateTime updatedAt;
 
+    @Column(length = 50)
+    private String cancelReason;
+
+    @Version
+    private Long version;
+
     public static Order pending(CreateOrderRequest req) {
         return Order.builder()
                 .orderNumber("ORD-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase())
                 .customerName(req.customerName())
-                .status(OrderStatus.CREATED)
+                .status(OrderStatus.PENDING)
                 .totalAmount(req.totalAmount())
                 .currency(req.currency())
                 .productSku(req.productSku())
@@ -73,5 +81,31 @@ public class Order {
                 .createdAt(LocalDateTime.now())
                 .updatedAt(LocalDateTime.now())
                 .build();
+    }
+
+    public void awaitPayment() {
+        if (getStatus().equals(OrderStatus.PENDING)) {
+            setStatus(OrderStatus.AWAITING_PAYMENT);
+            touch();
+        }
+    }
+
+    public void confirm() {
+        if (getStatus().equals(OrderStatus.AWAITING_PAYMENT)) {
+            setStatus(OrderStatus.CONFIRMED);
+            touch();
+        }
+    }
+
+    public void cancel(String reason) {
+        if (getStatus().equals(OrderStatus.PENDING) || getStatus().equals(OrderStatus.AWAITING_PAYMENT)) {
+            setStatus(OrderStatus.CANCELLED);
+            setCancelReason(reason);
+            touch();
+        }
+    }
+
+    private void touch() {
+        setUpdatedAt(LocalDateTime.now());
     }
 }
