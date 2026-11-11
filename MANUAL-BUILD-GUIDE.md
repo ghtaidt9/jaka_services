@@ -7,6 +7,7 @@ A step-by-step specification for typing the whole project yourself, from an empt
 ## Contents
 
 - [TL;DR](#tldr)
+- [The big picture (read this first)](#the-big-picture-read-this-first)
 - [Why this order](#why-this-order)
 - [Know before you start](#know-before-you-start)
 - [Stage map](#stage-map)
@@ -41,6 +42,58 @@ A step-by-step specification for typing the whole project yourself, from an empt
 - Go bottom-up in 14 stages: skeleton → 8 modules → `stack` → `bootstrap` → `envs` → tooling.
 - Stages 0–9 need no AWS account and cost nothing; every module is checked with mock-provider tests.
 - AWS (or LocalStack) is first needed at stage 10.
+
+## The big picture (read this first)
+
+The stages build bottom-up, but the finished project is easier to understand top-down. Keep this map open: every stage fills in one box.
+
+### Who calls whom
+
+```
+envs/dev/main.tf                     ← root: picks sizes for dev, owns the backend (S3 state from bootstrap/)
+└── module "stack"  (stack/)         ← the whole application, called once per environment
+    ├── module "network"             VPC, 2 public + 2 private subnets, IGW, NAT, 4 security groups (alb, ec2, rds, redis)
+    ├── module "security"            KMS key for secrets, IAM user allowed to start SSM sessions
+    ├── module "storage"             S3 bucket shared by the services, one prefix per service
+    ├── module "alb"                 public ALB + HTTP listener (services add their own path rules)
+    ├── module "redis"               ElastiCache replication group shared by the services
+    ├── module "postgres"  ×N        one RDS instance per service           (for_each = var.services)
+    ├── module "service"   ×N        ECR, IAM role, launch template, ASG, target group, listener rule, log group
+    │                                                                       (for_each = var.services)
+    └── module "observability"       SNS topic, CloudWatch alarms, dashboard over everything above
+
+bootstrap/                           ← separate root, applied once: the S3 bucket that holds every env's state
+envs/prod/                           ← same "stack" call as dev, different sizes (stage 12)
+```
+
+`envs/dev` contains almost no resources of its own. It only decides **how big**; `stack` decides **what exists**; each module decides **how one piece is built**.
+
+### What flows between modules
+
+Inside `stack/main.tf`, modules never see each other's resources. They only receive another module's **outputs** as inputs:
+
+| From | Output | To |
+|---|---|---|
+| network | `public_subnet_ids`, `alb_sg_id` | alb |
+| network | `private_subnet_ids`, `redis_sg_id` | redis |
+| network | `private_subnet_ids`, `rds_sg_id` | postgres |
+| network | `vpc_id`, `private_subnet_ids` | service |
+| security | `kms_key_arn` | redis, postgres, service |
+| security | `kms_key_id` | postgres |
+| storage | `bucket_arn` | service |
+| alb | `http_listener_arn` | service |
+| postgres[svc] | `address`, `port`, `db_name`, usernames, secret ARNs, `db_url_parameter_name` | service[svc] |
+| redis | `primary_endpoint_parameter_name`, `port_parameter_name`, `auth_secret_arn` | service |
+| service[svc] | `asg_name`, `target_group_arn_suffix`, `log_group_name`, `container_name` | observability |
+| postgres, redis, alb | `identifier`, `cluster_ids`, `arn_suffix` | observability |
+
+Reading the table top to bottom gives the dependency order: `network`, `security` and `storage` need nothing; `service` needs almost everything; `observability` watches everything.
+
+### Why the build order is the reverse of the map
+
+- A module can only be tested once the modules it depends on have defined their outputs. So the leaves (`network`, `security`, `storage`) come first and `stack` comes last, even though `stack` is what you read first.
+- After each stage, come back to this map and to the table above: the outputs you just wrote must match what the next module expects as inputs.
+- If you would rather start from something that runs and split it into modules later, build only `envs/dev` with flat resources for one service, add a second service, and extract `modules/service` when the duplication shows (use `moved {}` blocks so Terraform does not recreate anything). That top-down path suits work you have not designed yet, such as `envs/prod` or `envs/prod-eks`.
 
 ## Why this order
 

@@ -2,6 +2,7 @@ package com.jaka.order_service.scheduler;
 
 import java.time.LocalDateTime;
 
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,6 +25,7 @@ public class OrderTimeoutJob {
 
     @Scheduled(fixedDelay = 60_000)
     @Transactional
+    @CacheEvict(value = "orders", allEntries = true) // cancelled orders must not stay cached as AWAITING_PAYMENT
     public void expireStuckOrders() {
         orderRepository
                 .findByStatusAndUpdatedAtBefore(OrderStatus.AWAITING_PAYMENT, LocalDateTime.now().minusMinutes(5))

@@ -2,6 +2,7 @@ package com.jaka.order_service.consumer;
 
 import java.time.Instant;
 
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -38,6 +39,7 @@ public class OrderSagaListener {
     @KafkaListener(topics = { "inventory-events",
             "payment-events" }, groupId = "order-service")
     @Transactional
+    @CacheEvict(value = "orders", allEntries = true) // status changes here; GET /api/orders/ is cached 10 min
     public void on(EventEnvelope<JsonNode> event) {
         if (processedEventRepository.existsById(event.eventId()))
             return;
