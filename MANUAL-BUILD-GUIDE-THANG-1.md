@@ -1,6 +1,15 @@
-# Manual build guide — rebuilding `jaka_modularized` by hand
+# Manual build guide — THANG-1: rebuilding `jaka_modularized` by hand
 
-A step-by-step specification for typing the whole project yourself, from an empty folder to the finished layout. It describes **what** to write and **how to check it**, not the code itself. `jaka_modularized/` is the answer key: open it only after you have tried a stage.
+A step-by-step specification for typing the whole project yourself, from an empty folder to the finished layout. It describes **what** to write and **how to check it**, not the code itself.
+
+**Series:** **THANG-1 (this file)** · THANG-2 → [MANUAL-BUILD-GUIDE-THANG-2.md](MANUAL-BUILD-GUIDE-THANG-2.md) (Kubernetes on kind, Helm, Kafka) · THANG-3 → [MANUAL-BUILD-GUIDE-THANG-3.md](MANUAL-BUILD-GUIDE-THANG-3.md) (event-driven Saga, then EKS)
+
+**Answer keys.** Open them only after you have tried a stage.
+
+| Source | Notes |
+|---|---|
+| `git show fbfc964:jaka_modularized/<path>` | the original reference; the folder was deleted from the working tree in commit `21f55d6`, but git history still has it |
+| `jaka_infrastructure/` | your own build of this guide (prefix `jaka-mod`, no `envs/prod`). It already carries THANG-3 changes: `modules/ecr` split out of `modules/service`, subnet tag variables in `modules/network`, and `>= 5.50` provider pins in the modules EKS reuses |
 
 ---
 
@@ -38,7 +47,7 @@ A step-by-step specification for typing the whole project yourself, from an empt
 
 ## TL;DR
 
-- Build in a new sibling folder with its own project prefix, so nothing clashes with `jaka_modularized`.
+- Build in a new sibling folder with its own project prefix, so nothing clashes with `jaka_infrastructure` (or anything else already applied in your AWS account).
 - Go bottom-up in 14 stages: skeleton → 8 modules → `stack` → `bootstrap` → `envs` → tooling.
 - Stages 0–9 need no AWS account and cost nothing; every module is checked with mock-provider tests.
 - AWS (or LocalStack) is first needed at stage 10.
@@ -195,6 +204,8 @@ Do **not** ignore `.terraform.lock.hcl`. The reference does, and that is a mista
 | envs/dev, envs/prod | `>= 1.10.0` | aws `~> 5.50`, random `~> 3.6` |
 
 Modules never contain a `provider` block. Only `bootstrap` and `envs/*` do.
+
+THANG-3 (stage 9) changes `~> 5.50` to `>= 5.50` in the modules the EKS root reuses (`network`, `security`, `storage`, `redis`, `postgres`), because the EKS community module needs AWS provider 6. The rule behind it: modules declare a minimum, roots pin. You can type `>= 5.50` in those five modules now and save the edit later.
 
 ---
 
@@ -614,12 +625,14 @@ Setup: mock both providers; service `order`, db `orders`, users `order_admin` an
 
 ### Templates
 
-These two files are shell and JSON, not Terraform. Copy them rather than retyping, then read them so you know which variables they expect.
+These two files are shell and JSON, not Terraform. Copy them rather than retyping, then read them so you know which variables they expect. From your build folder at the repo root:
 
 ```bash
-cp ../jaka_modularized/modules/service/templates/service-bootstrap.sh.tpl modules/service/templates/
-cp ../jaka_modularized/modules/service/templates/cloudwatch-agent-config.json.tpl modules/service/templates/
+cp ../jaka_infrastructure/modules/service/templates/service-bootstrap.sh.tpl modules/service/templates/
+cp ../jaka_infrastructure/modules/service/templates/cloudwatch-agent-config.json.tpl modules/service/templates/
 ```
+
+THANG-3 (stage 10) later moves the two ECR resources below into their own `modules/ecr`, so the EKS root can use them without the Auto Scaling group. Build them here as described; THANG-3 shows the move, including the `moved` blocks that keep existing repositories.
 
 What `service-bootstrap.sh.tpl` does at instance boot:
 
@@ -1347,5 +1360,6 @@ Do these after the base stack works:
 
 ## Appendix G — Not covered
 
-- **Deploy scripts.** `build-and-push.sh`, `deploy.sh`, `rollback.sh`, `smoke-tests.sh`, `load-test.sh` and `lib.sh` exist only in `jaka_aws_networking/scripts/`. They read that project's outputs and the `/dev/<svc>-image-tag` names, so they need adapting to the map outputs and `/<prefix>/<svc>-image-tag` names here.
+- **Deploy scripts.** `build-and-push.sh`, `deploy.sh`, `rollback.sh`, `smoke-tests.sh`, `load-test.sh` and `lib.sh` belonged to the month-1 `jaka_aws_networking/` project, which is no longer in this repo. They read that project's outputs and the `/dev/<svc>-image-tag` names, so they would need adapting to the map outputs and `/<prefix>/<svc>-image-tag` names here. The EC2 path has no deploy script in this repo; THANG-2 and THANG-3 deploy with `cluster-up.sh` and `eks-up.sh` instead.
+- **Subnet tags for EKS.** THANG-3 (stage 9) adds `public_subnet_tags` and `private_subnet_tags` variables to `modules/network`. Adding them now (`map(string)`, default `{}`, merged into the subnet tags) is harmless for EC2.
 - **`README.md`.** Write it last, in your own words; explaining the design from memory is the best test that the rebuild worked.
