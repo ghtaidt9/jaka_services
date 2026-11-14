@@ -1,7 +1,6 @@
 package com.jaka.payment_service;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.entry;
 
 import java.math.BigDecimal;
 

@@ -5,11 +5,13 @@ COPY build.gradle settings.gradle ./
 COPY gradle ./gradle
 RUN gradle dependencies --no-daemon || true
 COPY src ./src
-RUN gradle clean build -x test --no-daemon
+RUN gradle clean bootJar --no-daemon
 
 # --- stage 2: run ---
 FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
-COPY --from=build /build/build/libs/payment-service-0.0.1-SNAPSHOT.jar app.jar
-EXPOSE 8080
+RUN addgroup -S app && adduser -S -G app app
+USER app
+COPY --from=build /build/build/libs/app.jar app.jar
+EXPOSE 8082
 ENTRYPOINT ["java", "-jar", "app.jar"]
