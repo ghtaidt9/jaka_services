@@ -9,6 +9,7 @@ import org.springframework.transaction.annotation.Transactional;
 import com.jaka.inventory_service.dto.InventoryRejected;
 import com.jaka.inventory_service.dto.InventoryReleased;
 import com.jaka.inventory_service.dto.InventoryReserved;
+import com.jaka.inventory_service.dto.OrderCancelled;
 import com.jaka.inventory_service.dto.OrderCreated;
 import com.jaka.inventory_service.dto.PaymentCompleted;
 import com.jaka.inventory_service.dto.PaymentFailed;
@@ -93,6 +94,33 @@ public class InventoryService {
         outboxWriter.write("InventoryReleased", r.getOrderId().toString(),
                 new InventoryReleased(r.getOrderId(), r.getSku(), r.getQuantity(), payment.customerName(),
                         payment.reason()));
+    }
+
+    // Compensation for OrderCancelled (timeout, or any other cancel the order-service decides on).
+    // Must be idempotent and must not fail for orders that never got a reservation.
+    @Transactional
+    public void releaseForCancelledOrder(OrderCancelled order) {
+        Optional<Reservation> found = reservationRepository.findById(order.orderId());
+        if (found.isEmpty()) {
+            return; // cancelled because stock was rejected: nothing was reserved
+        }
+        Reservation r = found.get();
+        Product p = productRepository.findById(r.getSku()).orElseThrow();
+        switch (r.getStatus()) {
+            case RESERVED -> p.setReserved(p.getReserved() - r.getQuantity()); // still held: reserved → available
+            case COMMITTED -> {
+                // late PaymentCompleted reached inventory before OrderCancelled; order-service refunds the
+                // payment, so the goods go back on the shelf (reserved was already reduced by commit)
+            }
+            case RELEASED -> {
+                return; // already released (PaymentFailed, or this event redelivered)
+            }
+        }
+        p.setAvailable(p.getAvailable() + r.getQuantity());
+        r.setStatus(ReservationStatus.RELEASED);
+        outboxWriter.write("InventoryReleased", r.getOrderId().toString(),
+                new InventoryReleased(r.getOrderId(), r.getSku(), r.getQuantity(), order.customerName(),
+                        order.reason()));
     }
 
 }

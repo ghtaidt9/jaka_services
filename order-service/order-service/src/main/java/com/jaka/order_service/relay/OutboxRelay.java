@@ -40,7 +40,8 @@ public class OutboxRelay {
                     MDC.put(Correlation.MDC_KEY, event.getCorrelationId());
                 }
                 kafka.send(record).join();
-                log.info("Published {} {} for aggregate {}", event.getEventType(), event.getEventId(), event.getAggregateId());
+                log.info("Published {} {} for aggregate {}", event.getEventType(), event.getEventId(),
+                        event.getAggregateId());
             } finally {
                 if (previousCId != null) {
                     MDC.put(Correlation.MDC_KEY, previousCId);
@@ -51,4 +52,6 @@ public class OutboxRelay {
             event.setPublishedAt(Instant.now());
         }
     }
+
+    
 }

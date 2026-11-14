@@ -37,7 +37,7 @@ public class PaymentEventConsumer {
         switch (event.eventType()) {
             case "PaymentCompleted" -> inventoryService.commit(json.treeToValue(event.payload(), PaymentCompleted.class));
             case "PaymentFailed" -> inventoryService.release(json.treeToValue(event.payload(), PaymentFailed.class));
-            default -> log.warn("Unknown event type: {}", event.eventType());
+            default -> log.debug("Ignoring {} for order {}", event.eventType(), event.aggregateId()); // e.g. PaymentRefunded
         }
         processed.save(new ProcessedEvent(event.eventId(), Instant.now()));
     }

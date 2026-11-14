@@ -29,6 +29,7 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-kafka'
 	testImplementation 'org.springframework.boot:spring-boot-starter-kafka-test'
 	testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+	testImplementation 'org.testcontainers:testcontainers-postgresql' 
 	testImplementation 'org.testcontainers:testcontainers-kafka'   // Testcontainers 2.x đổi tên artifact (trước là org.testcontainers:kafka)
 
 
@@ -43,3 +44,8 @@ dependencies {
 tasks.named('test') {
 	useJUnitPlatform()
 }
+
+tasks.named('bootJar') {
+    archiveFileName = 'app.jar'
+}
+

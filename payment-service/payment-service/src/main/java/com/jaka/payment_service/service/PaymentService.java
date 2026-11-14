@@ -13,6 +13,8 @@ import org.springframework.transaction.annotation.Transactional;
 import com.jaka.payment_service.dto.InventoryReserved;
 import com.jaka.payment_service.dto.PaymentCompleted;
 import com.jaka.payment_service.dto.PaymentFailed;
+import com.jaka.payment_service.dto.PaymentRefunded;
+import com.jaka.payment_service.dto.RefundRequested;
 import com.jaka.payment_service.entity.Payment;
 import com.jaka.payment_service.entity.PaymentMethod;
 import com.jaka.payment_service.entity.PaymentStatus;
@@ -60,6 +62,23 @@ public class PaymentService {
             outboxWriter.write("PaymentFailed", req.orderId().toString(), new PaymentFailed(req.orderId(),
                     req.totalAmount(), req.currency(), req.customerName(), "CARD_DECLINED"));
         }
+    }
+
+    // Compensation for a payment that arrived after the order was cancelled (timeout).
+    // Idempotent on business state: only a COMPLETED payment is refunded, and only once.
+    @Transactional
+    @CacheEvict(value = "payments", allEntries = true)
+    public void refund(RefundRequested req) {
+        Payment payment = paymentRepository.findByPaymentReference(req.paymentReference())
+                .orElseThrow(() -> new IllegalStateException("No payment " + req.paymentReference()
+                        + " for order " + req.orderId())); // retried, then lands in order-events-dlt
+        if (payment.getStatus() != PaymentStatus.COMPLETED) {
+            return; // already REFUNDED (or never charged) → nothing to do
+        }
+        payment.setStatus(PaymentStatus.REFUNDED);
+        outboxWriter.write("PaymentRefunded", req.orderId().toString(), new PaymentRefunded(req.orderId(),
+                payment.getPaymentReference(), payment.getAmount(), payment.getCurrency(), req.customerName(),
+                req.reason()));
     }
 
 }

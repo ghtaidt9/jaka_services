@@ -6,22 +6,32 @@ Danh mục mọi event giữa 4 service: order, inventory, payment, notification
 
 | Event | Topic | Producer | Consumer (group) | Ý nghĩa |
 |---|---|---|---|---|
-| `OrderCreated` | `order-events` | order-service | inventory-service, notification-service | Đơn mới đã được lưu |
-| `InventoryReserved` | `inventory-events` | inventory-service | payment-service | Kho đã giữ hàng cho đơn |
-| `InventoryRejected` | `inventory-events` | inventory-service | notification-service | Không đủ hàng, đơn không thể tiếp tục |
-| `InventoryReleased` | `inventory-events` | inventory-service | — (notification bỏ qua) | Hàng đã giữ được trả lại kho (bù trừ sau `PaymentFailed`) |
-| `PaymentCompleted` | `payment-events` | payment-service | inventory-service, notification-service | Đã thu tiền |
-| `PaymentFailed` | `payment-events` | payment-service | inventory-service, notification-service | Thanh toán bị từ chối |
+| `OrderCreated` | `order-events` | order-service | inventory-service, notification-service | Đơn mới đã được lưu (`PENDING`) |
+| `OrderConfirmed` | `order-events` | order-service | — (notification bỏ qua) | Saga thành công: đơn `CONFIRMED` |
+| `OrderCancelled` | `order-events` | order-service | inventory-service | Đơn `CANCELLED` (hết hàng, thanh toán lỗi, hoặc timeout) — inventory release nếu còn giữ hàng |
+| `RefundRequested` | `order-events` | order-service | payment-service | `PaymentCompleted` đến sau khi đơn đã huỷ (timeout) → yêu cầu hoàn tiền |
+| `InventoryReserved` | `inventory-events` | inventory-service | payment-service, order-service, order-summary-projector | Kho đã giữ hàng cho đơn |
+| `InventoryRejected` | `inventory-events` | inventory-service | order-service, order-summary-projector, notification-service | Không đủ hàng, đơn không thể tiếp tục |
+| `InventoryReleased` | `inventory-events` | inventory-service | order-summary-projector | Hàng đã giữ được trả lại kho (bù trừ sau `PaymentFailed` / `OrderCancelled`) |
+| `PaymentCompleted` | `payment-events` | payment-service | inventory-service, order-service, order-summary-projector, notification-service | Đã thu tiền |
+| `PaymentFailed` | `payment-events` | payment-service | inventory-service, order-service, order-summary-projector, notification-service | Thanh toán bị từ chối |
+| `PaymentRefunded` | `payment-events` | payment-service | — (mọi group bỏ qua) | Đã hoàn tiền sau `RefundRequested`; phát ra để đóng vòng Saga, sẵn cho notification/projector dùng sau |
 
 Mỗi consumer group chỉ nhận event của topic nó nghe; event không cần xử lý thì bỏ qua (không throw):
 
 | Consumer group | Nghe topic | Xử lý | Bỏ qua |
 |---|---|---|---|
-| `inventory-service` | `order-events`, `payment-events` | `OrderCreated` → reserve · `PaymentCompleted` → commit · `PaymentFailed` → release | — |
-| `payment-service` | `inventory-events` | `InventoryReserved` → charge | `InventoryRejected`, `InventoryReleased` |
-| `notification-service` | cả 3 topic | `OrderCreated`, `InventoryRejected`, `PaymentCompleted`, `PaymentFailed` → gửi mail | `InventoryReserved`, `InventoryReleased` |
+| `order-service` (Saga) | `inventory-events`, `payment-events` | `InventoryReserved` → `AWAITING_PAYMENT` · `InventoryRejected`, `PaymentFailed` → `CANCELLED` + `OrderCancelled` · `PaymentCompleted` → `CONFIRMED` + `OrderConfirmed` (đơn đã `CANCELLED` → `RefundRequested`) | `InventoryReleased`, `PaymentRefunded` |
+| `order-summary-projector` | `inventory-events`, `payment-events` | `InventoryReserved`, `InventoryRejected`, `InventoryReleased`, `PaymentCompleted`, `PaymentFailed` → cập nhật read model `order_summary` | `PaymentRefunded` |
+| `inventory-service` | `order-events`, `payment-events` | `OrderCreated` → reserve · `PaymentCompleted` → commit · `PaymentFailed`, `OrderCancelled` → release | `OrderConfirmed`, `RefundRequested`, `PaymentRefunded` |
+| `payment-service` | `inventory-events`, `order-events` | `InventoryReserved` → charge · `RefundRequested` → refund | `InventoryRejected`, `InventoryReleased`, `OrderCreated`, `OrderConfirmed`, `OrderCancelled` |
+| `notification-service` | cả 3 topic | `OrderCreated`, `InventoryRejected`, `PaymentCompleted`, `PaymentFailed` → gửi mail | `InventoryReserved`, `InventoryReleased`, `OrderConfirmed`, `OrderCancelled`, `RefundRequested`, `PaymentRefunded` |
+
+> Consumer trên một topic có nhiều loại event **phải** `switch` theo `eventType` và đọc payload dạng `JsonNode`. Ép mọi payload về một record (ví dụ `EventEnvelope<OrderCreated>`) làm `OrderConfirmed`/`OrderCancelled` thiếu field → exception → hết retry → vào DLT.
 
 ## 2. Luồng
+
+### 2a. Luồng chính
 
 ```
 order-svc ──OrderCreated──► order-events ──► inventory-svc: reserve
@@ -30,8 +40,24 @@ order-svc ──OrderCreated──► order-events ──► inventory-svc: rese
                                               │                                                       └─ lỗi → PaymentFailed    ─► payment-events ──► inventory-svc: release
                                               │                                                                                                        └─ InventoryReleased ─► inventory-events
                                               └─ thiếu hàng → InventoryRejected ─► inventory-events
+
 notification-svc nghe cả 3 topic và gửi mail cho OrderCreated, InventoryRejected, PaymentCompleted, PaymentFailed
 ```
+
+### 2b. Saga ở order-svc
+
+```
+                         ┌─ InventoryReserved ─► AWAITING_PAYMENT
+inventory-events ──┐     ├─ InventoryRejected ─► CANCELLED ─► OrderCancelled
+                   ├──► order-svc
+payment-events  ───┘     ├─ PaymentFailed     ─► CANCELLED ─► OrderCancelled
+                         └─ PaymentCompleted ─┬─ đang AWAITING_PAYMENT ─► CONFIRMED ─► OrderConfirmed
+                                              └─ đã CANCELLED (timeout) ─► RefundRequested ─► payment-svc: refund ─► PaymentRefunded
+
+job timeout (5 phút, AWAITING_PAYMENT) ─► CANCELLED (PAYMENT_TIMEOUT) ─► OrderCancelled ─► inventory-svc: release ─► InventoryReleased
+```
+
+`scripts/saga-demo.sh` (trong `jaka_infrastructure`) chạy cả 4 nhánh và kiểm tra trạng thái order, reservation, payment, tồn kho.
 
 ## 3. Quy ước chung
 
@@ -163,7 +189,14 @@ Producer: inventory-service, khi `available < quantity`. Không thay đổi kho,
 ```
 
 ### `InventoryReleased`
-Producer: inventory-service, sau `PaymentFailed` (bù trừ: `reserved -= quantity`, `available += quantity`, reservation `RELEASED`). Chỉ phát khi reservation đang `RESERVED` — nhận `PaymentFailed` lần 2 không phát lại.
+Producer: inventory-service, khi bù trừ một reservation (reservation → `RELEASED`, `available += quantity`):
+
+| Nhận | Reservation đang | Thay đổi `reserved` | Phát `InventoryReleased` |
+|---|---|---|---|
+| `PaymentFailed` | `RESERVED` | `-= quantity` | có |
+| `OrderCancelled` | `RESERVED` (timeout) | `-= quantity` | có |
+| `OrderCancelled` | `COMMITTED` (`PaymentCompleted` tới inventory trước `OrderCancelled`, đơn sẽ được hoàn tiền) | không đổi (commit đã trừ) | có |
+| bất kỳ | `RELEASED`, hoặc không có reservation (hết hàng) | — | không (idempotent) |
 
 | Field | Kiểu | Ghi chú |
 |---|---|---|
@@ -171,7 +204,7 @@ Producer: inventory-service, sau `PaymentFailed` (bù trừ: `reserved -= quanti
 | `productSku` | string | |
 | `quantity` | int | |
 | `customerName` | string | |
-| `reason` | string | Chép từ `PaymentFailed.reason`, ví dụ `CARD_DECLINED` |
+| `reason` | string | Chép từ `PaymentFailed.reason` (`CARD_DECLINED`) hoặc `OrderCancelled.reason` (`PAYMENT_TIMEOUT`) |
 
 ```json
 {
@@ -246,6 +279,128 @@ Producer: payment-service, khi thanh toán bị từ chối. Từ chối là k�
 }
 ```
 
+### `OrderConfirmed`
+Producer: order-service (Saga), khi `PaymentCompleted` tới lúc đơn đang `AWAITING_PAYMENT` → `CONFIRMED`. Chỉ phát khi trạng thái thực sự đổi.
+
+| Field | Kiểu | Ghi chú |
+|---|---|---|
+| `orderId` | long | |
+| `orderNumber` | string | |
+| `customerName` | string | |
+| `totalAmount` | decimal | |
+| `currency` | string | |
+
+```json
+{
+  "eventId": "0d6f3a91-8e2c-4b57-a1f4-6c9e2d7b3a80",
+  "eventType": "OrderConfirmed",
+  "version": 1,
+  "aggregateId": "9",
+  "occurredAt": "2026-11-08T13:01:24.512Z",
+  "payload": {
+    "orderId": 9,
+    "orderNumber": "ORD-3F9A1C2E",
+    "customerName": "Tai",
+    "totalAmount": 20,
+    "currency": "USD"
+  }
+}
+```
+
+### `OrderCancelled`
+Producer: order-service, khi đơn chuyển sang `CANCELLED`, từ 2 nơi:
+- Saga listener: sau `InventoryRejected` hoặc `PaymentFailed`
+- `OrderTimeoutJob`: đơn `AWAITING_PAYMENT` quá 5 phút (quét mỗi 60 giây) → `PAYMENT_TIMEOUT`
+
+Mang theo `productSku` và `quantity` để consumer không phải gọi lại order-service.
+
+| Field | Kiểu | Ghi chú |
+|---|---|---|
+| `orderId` | long | |
+| `orderNumber` | string | |
+| `customerName` | string | |
+| `productSku` | string | |
+| `quantity` | int | |
+| `reason` | string | `orders.cancel_reason`: `Insufficient stock`, `CARD_DECLINED`, hoặc `PAYMENT_TIMEOUT` |
+
+```json
+{
+  "eventId": "7b2e4c10-5d9a-4f3e-8c61-2a0f9e1d7b45",
+  "eventType": "OrderCancelled",
+  "version": 1,
+  "aggregateId": "12",
+  "occurredAt": "2026-11-08T13:07:00.031Z",
+  "payload": {
+    "orderId": 12,
+    "orderNumber": "ORD-9C1D7E3B",
+    "customerName": "Tai",
+    "productSku": "TEST-001",
+    "quantity": 1,
+    "reason": "PAYMENT_TIMEOUT"
+  }
+}
+```
+
+### `RefundRequested`
+Producer: order-service (Saga), khi `PaymentCompleted` tới lúc đơn **đã** `CANCELLED` (thường do timeout). Đơn giữ nguyên `CANCELLED`; tiền phải trả lại. Đây là kết quả nghiệp vụ, không phải lỗi — không đẩy vào DLT.
+
+| Field | Kiểu | Ghi chú |
+|---|---|---|
+| `orderId` | long | |
+| `paymentReference` | string | Từ `PaymentCompleted` — payment-service tìm giao dịch theo mã này |
+| `amount` | decimal | |
+| `currency` | string | |
+| `customerName` | string | |
+| `reason` | string | `cancel_reason` của đơn, ví dụ `PAYMENT_TIMEOUT` |
+
+```json
+{
+  "eventId": "c5a8e2d7-1f4b-4e90-b3a6-8d2c7f0e9b14",
+  "eventType": "RefundRequested",
+  "version": 1,
+  "aggregateId": "12",
+  "occurredAt": "2026-11-08T13:09:41.877Z",
+  "payload": {
+    "orderId": 12,
+    "paymentReference": "PAY-4E8A2C9F",
+    "amount": 100,
+    "currency": "USD",
+    "customerName": "Tai",
+    "reason": "PAYMENT_TIMEOUT"
+  }
+}
+```
+
+### `PaymentRefunded`
+Producer: payment-service, sau `RefundRequested`: payment `COMPLETED` → `REFUNDED`. Payment đã `REFUNDED` thì không làm gì (idempotent). Không tìm thấy `paymentReference` → exception → retry → `order-events-dlt`.
+
+| Field | Kiểu | Ghi chú |
+|---|---|---|
+| `orderId` | long | |
+| `paymentReference` | string | |
+| `amount` | decimal | Lấy từ bản ghi `payments`, không lấy từ request |
+| `currency` | string | |
+| `customerName` | string | |
+| `reason` | string | Chép từ `RefundRequested.reason` |
+
+```json
+{
+  "eventId": "f1d9b3a6-2c7e-4a85-9e04-5b8c1a6d3f72",
+  "eventType": "PaymentRefunded",
+  "version": 1,
+  "aggregateId": "12",
+  "occurredAt": "2026-11-08T13:09:42.310Z",
+  "payload": {
+    "orderId": 12,
+    "paymentReference": "PAY-4E8A2C9F",
+    "amount": 100,
+    "currency": "USD",
+    "customerName": "Tai",
+    "reason": "PAYMENT_TIMEOUT"
+  }
+}
+```
+
 ## 5. Record Java theo service
 
 Mỗi service copy đúng các record nó gửi hoặc nhận, trong `dto/`:
@@ -254,14 +409,12 @@ Mỗi service copy đúng các record nó gửi hoặc nhận, trong `dto/`:
 |---|---|---|---|---|
 | `EventEnvelope<T>` | ✅ | ✅ | ✅ | ✅ |
 | `OrderCreated` | gửi | nhận | — | nhận |
+| `OrderConfirmed` | gửi | — | — | — |
+| `OrderCancelled` | gửi | nhận | — | — |
+| `RefundRequested` | gửi | — | nhận | — |
 | `InventoryReserved` | — | gửi | nhận | — |
-| `InventoryRejected` | — | gửi | — | nhận |
-| `InventoryReleased` | — | gửi | — | — |
-| `PaymentCompleted` | — | nhận | gửi | nhận |
-| `PaymentFailed` | — | nhận | gửi | nhận |
-
-## 6. Kế hoạch (tuần 10)
-
-Saga thêm vào danh mục — cập nhật file này khi làm:
-- order-service nghe `inventory-events` + `payment-events` (group `order-service`) để cập nhật `orders.status`
-- Event mới trên `order-events`: `OrderConfirmed`, `OrderCancelled` (inventory release khi nhận `OrderCancelled`, ví dụ timeout)
+| `InventoryRejected` | nhận | gửi | — | nhận |
+| `InventoryReleased` | nhận (projector) | gửi | — | — |
+| `PaymentCompleted` | nhận | nhận | gửi | nhận |
+| `PaymentFailed` | nhận | nhận | gửi | nhận |
+| `PaymentRefunded` | — | — | gửi | — |

@@ -1,7 +1,7 @@
 package com.jaka.order_service.config;
 
 import com.jaka.order_service.entity.Order;
-import com.jaka.order_service.entity.OrderStatus;
+import com.jaka.order_service.enums.OrderStatus;
 import com.jaka.order_service.repository.OrderRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.CommandLineRunner;

@@ -1,0 +1,91 @@
+name: build-service
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: "Short service name: order | payment | inventory | notification"
+        required: true
+        type: string
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ap-southeast-1
+      SVC_DIR: ${{ inputs.service }}-service/${{ inputs.service }}-service
+      REPO: jaka-mod-${{ inputs.service }}-service
+      TAG: sha-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Runtests
+        working-directory: ${{ env.SVC_DIR }}
+        run: ./gradlew test --no-daemon
+
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-report-${{ inputs.service }}
+          path: ${{ env.SVC_DIR }}/build/reports/tests/test
+
+      - uses: docker/setup-buildx-action@v4
+
+      # ------ PR: build only, no push ------
+      - name: Build image (PR only)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.SVC_DIR }}
+          push: false
+          tags: ${{ env.REPO }}:${{ env.TAG }}
+          cache-from: type=gha,scope=${{ inputs.service }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.service }}
+          provenance: false
+
+      # ------- push to master / manual run: AWS login push to ECR ------
+      - name: Configure AWS credentials
+        if: github.event_name != 'pull_request'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+        
+      - name: Login to ECR
+        if: github.event_name != 'pull_request'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Check image already exists
+        if: github.event_name != 'pull_request'
+        id: exists
+        run: |
+          if aws ecr describe-images --repository-name "$REPO" \
+            --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Image $REPO:$TAG already exists, skipping push (immutable tag)."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and push image
+        if: github.event_name != 'pull_request' && steps.exists.outputs.skip == 'false'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.SVC_DIR }}
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.REPO }}:${{ env.TAG }}
+          cache-from: type=gha,scope=${{  inputs.service }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.service }}
+          provenance: false

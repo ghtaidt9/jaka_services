@@ -1,0 +1,31 @@
+name: notification-ci
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "notification-service/**"
+      - ".github/workflows/notification-ci.yml"
+      - ".github/workflows/_build-service.yml"
+  pull_request:
+    paths:
+      - "notification-service/**"
+      - ".github/workflows/notification-ci.yml"
+      - ".github/workflows/_build-service.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    uses: ./.github/workflows/_build-service.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      service: notification
