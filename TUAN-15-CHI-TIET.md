@@ -57,15 +57,16 @@ Week 14 was a learning stepping stone. Remove it now so you don't have two deplo
 - Delete `envs/shared/github-deploy.tf` + the `gha_deploy_role_arn` output.
 - Delete `scripts/deploy-service.sh` too. Once ArgoCD owns the 4 Deployments, the script can't work. Helm refuses to install a release over resources it didn't create (`invalid ownership metadata`): ArgoCD renders the chart with `helm template` and applies the result itself, so those resources carry no Helm release annotations. Even if Helm did deploy, `selfHeal` (C4) would put git's version back.
 
-**GitHub variables:**
+**GitHub variables:** only if you created them in TUAN-14 C4. Check first; `gh variable delete` fails with "not found" on a variable that doesn't exist:
 
 ```bash
-cd /home/taidt9/projects/springboot_aws_compute_databases
+cd ~/projects/jaka_services
+gh variable list                         # delete only the ones listed
 gh variable delete AWS_DEPLOY_ROLE_ARN
 gh variable delete EKS_DEV_UP
 ```
 
-Then re-apply the 2 Terraform environments (shared first, then dev-eks if it's running).
+**Terraform:** only if week 14 was applied on AWS. Then re-apply the 2 environments (shared first, then dev-eks if it's running), so the deploy role and the access entry are destroyed. If week 14 never reached AWS, deleting the files is all there is: nothing exists in AWS to remove.
 
 If dev-eks **is running** with the week-14 Helm releases, remove them before the ApplicationSet (C4) creates the ArgoCD versions. This gives a short outage in `dev`, which is fine:
 
@@ -217,6 +218,7 @@ Explanation:
 **First seed:** after merging, run each service workflow once by hand to write real tags into all 4 values files:
 
 ```bash
+cd ~/projects/jaka_services
 for svc in order payment inventory notification; do gh workflow run "$svc-ci.yml"; done
 ```
 
@@ -350,7 +352,7 @@ Open `http://localhost:8080`, user `admin`, password as printed. You'll see the 
 **Experiment 1 — deploy through git:** edit one line in order-service → push to master → CI builds + the release job commits to the infra repo → wait (≤3 minutes) → the order-service card in the UI goes to Syncing → pods roll over. Look at the bot's commit:
 
 ```bash
-cd ~/projects/springboot_aws_compute_databases/jaka_infrastructure
+cd ~/projects/jaka_infrastructure
 git pull && git log --oneline -3
 ```
 
@@ -375,7 +377,7 @@ kubectl get deployment order-service -n dev -o yaml | grep -A2 HACK   # gone!
 **Experiment 3 — rollback = git revert:** no more `helm rollback`; going back is a pure git operation:
 
 ```bash
-cd ~/projects/springboot_aws_compute_databases/jaka_infrastructure
+cd ~/projects/jaka_infrastructure
 git log --oneline charts/spring-service/values/   # find the "release: ..." commit
 git revert <commit-sha>
 git push
@@ -481,6 +483,8 @@ runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
 ```
 
 Micrometer is the metrics API (already part of Boot actuator); this registry is the Prometheus-format "output". `runtimeOnly` because the code doesn't call any of its classes directly.
+
+order-service and payment-service already have `implementation 'io.micrometer:micrometer-registry-cloudwatch2'` from month 1. Leave it. Its registry is only created when `cloudwatch.metrics.enabled=true` (the `@ConditionalOnProperty` on `config/CloudWatchMetricsConfig.java`), and neither the `application.yaml` files nor the chart values set that property, so on EKS Prometheus is the only active registry.
 
 **`application.yaml`**: the `management:` section of each service already has `endpoint.health.show-details`, `endpoints.web.exposure.include: health,info,metrics`, and `metrics.tags` (`service: <name>-service`, `environment: dev`). Change two things and leave the rest:
 
@@ -620,7 +624,7 @@ metrics:
 Check the render before pushing. With the API version, the output contains `kind: ServiceMonitor` with `path: /api/orders/actuator/prometheus`; without it, the count is `0`:
 
 ```bash
-cd ~/projects/springboot_aws_compute_databases/jaka_infrastructure/charts/spring-service
+cd ~/projects/jaka_infrastructure/charts/spring-service
 helm template order-service . -f values/order-eks.yml --set image.repository=test \
   --api-versions monitoring.coreos.com/v1 | grep -A12 'kind: ServiceMonitor'
 helm template order-service . -f values/order-eks.yml --set image.repository=test | grep -c 'kind: ServiceMonitor'
