@@ -29,3 +29,13 @@ jobs:
       id-token: write
     with:
       service: payment
+  deploy-dev:
+    needs: build
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/deploy-dev.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      services: '["payment"]'
+      tag: sha-${{ github.sha }}

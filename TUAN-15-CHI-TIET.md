@@ -9,7 +9,7 @@ Two areas this week:
 **First half — GitOps:** flip the deploy model from *push* (week 14) to *pull*:
 
 ```
-Week 14 (push):  CI --(helm upgrade, holds cluster credentials)--> EKS
+Week 14 (push):  CD deploy job --(helm upgrade, holds cluster credentials)--> EKS
 
 Week 15 (pull):  CI --(edit image.tag, git commit)--> repo jaka_infrastructure
                                                           ▲
@@ -20,7 +20,7 @@ Week 15 (pull):  CI --(edit image.tag, git commit)--> repo jaka_infrastructure
                                                      namespace dev
 ```
 
-Git becomes the **single source of truth**: what the cluster runs = read the `values/<svc>-eks.yml` files on master. CI no longer has any access to the cluster.
+Git becomes the **single source of truth**: what the cluster runs = read the `values/<svc>-eks.yml` files on master. GitHub Actions no longer has any access to the cluster.
 
 **Second half — Metrics:** install kube-prometheus-stack (Prometheus + Grafana), expose `/actuator/prometheus` on the 4 services, let Prometheus find and scrape them through a ServiceMonitor, and look at RPS / error rate / p95 latency in Grafana.
 
@@ -33,9 +33,9 @@ The five weaknesses of push-based CD, mapped straight onto what you just built:
 | # | Week-14 weakness | Concrete symptom | How GitOps fixes it |
 |---|---|---|---|
 | 1 | You can't tell which version the cluster runs without `helm get` | You need a kubeconfig to answer "what's running in dev?" | Read `image.tag` in git; anyone can see it |
-| 2 | GitHub holds credentials into the cluster | A deploy role + access entry + environment: a whole machinery just so CI can get into the cluster | ArgoCD sits **inside** the cluster and pulls outward; nobody gets in from outside |
+| 2 | GitHub holds credentials into the cluster | A deploy role + access entry + environment: a whole machinery just so the deploy job can get into the cluster | ArgoCD sits **inside** the cluster and pulls outward; nobody gets in from outside |
 | 3 | Nobody notices drift | Someone runs `kubectl set image` by hand → the cluster diverges from git forever | `selfHeal: true`: ArgoCD restores git's state within seconds |
-| 4 | Chart changes don't deploy | Edit `deployment.yml` in the infra repo → nothing runs (CI only triggers from the app repo) | ArgoCD watches the infra repo; a chart change is synced |
+| 4 | Chart changes don't deploy | Edit `deployment.yml` in the infra repo → nothing runs (the workflows only trigger from the app repo) | ArgoCD watches the infra repo; a chart change is synced |
 | 5 | Pushing while the cluster is off loses the deploy | `EKS_DEV_UP=false` → job skipped → that image is never deployed automatically | The tag is still written to git; when the cluster comes back, ArgoCD catches up by itself |
 
 > **Trade-off, stated up front:** (1) deploys are no longer "instant": by default ArgoCD polls the repo every **3 minutes** (acceptable; there's a way to force an immediate refresh for demos). (2) CI now needs **write access to the infra repo**, granted with a deploy key scoped to that repo only, which is far narrower than cluster access. (3) One more system to run (ArgoCD), in exchange for removing all of week 14's deploy-role/access-entry machinery.

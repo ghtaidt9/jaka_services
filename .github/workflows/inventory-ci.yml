@@ -29,3 +29,13 @@ jobs:
       id-token: write
     with:
       service: inventory
+  deploy-dev:
+    needs: build
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/deploy-dev.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      services: '["inventory"]'
+      tag: sha-${{ github.sha }}

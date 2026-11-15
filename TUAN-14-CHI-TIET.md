@@ -18,20 +18,26 @@ Main tasks:
 
 1. **A second AWS role**, `jaka-mod-gha-deploy-dev`, used only for deploying and separate from the CI role.
 2. **An EKS access entry** giving that role Edit rights, locked to namespace `dev`.
-3. Changes to the chart + `eks-up.sh`: infrastructure config (DB URL, Redis host) moves into a **ConfigMap**, so deploying from CI doesn't need to know any secret or URL.
-4. A `deploy-service.sh` script (runs from both your laptop and CI) + a `deploy-dev.yml` workflow.
+3. Changes to the chart + `eks-up.sh`: infrastructure config (DB URL, Redis host) moves into a **ConfigMap**, so the deploy job (CD) doesn't need to know any secret or URL.
+4. A `deploy-service.sh` script (runs from both your laptop and the CD deploy job) + a `deploy-dev.yml` workflow.
 
-This week's model is called **push-based CD** (CI "pushes" into the cluster). It works well, but it has weaknesses that week 15 solves with GitOps. Doing this week first is what makes you *feel* why people need ArgoCD.
+This week's model is called **push-based CD** (the GitHub Actions deploy job "pushes" into the cluster). It works well, but it has weaknesses that week 15 solves with GitOps. Doing this week first is what makes you *feel* why people need ArgoCD.
+
+> **CI vs CD in this guide:** both run in GitHub Actions, but they are different jobs with different roles.
+> - **CI** (week 13): build → test → push the image to ECR. Role `jaka-mod-gha-ci`.
+> - **CD** (this week): deploy that image to the cluster (`helm upgrade`, smoke test). Role `jaka-mod-gha-deploy-dev`.
+>
+> "The pipeline" means both together.
 
 ---
 
 ## Why each task (seen from the current repo)
 
-| # | Current state | Problem when CI wants to deploy | This week's task |
+| # | Current state | Problem when the pipeline wants to deploy (CD) | This week's task |
 |---|---|---|---|
-| 1 | The `jaka-mod-gha-ci` role (week 13) only has ECR permissions | CI can't see the cluster | A new deploy-only role + an EKS access entry |
-| 2 | `eks-up.sh` deploys the apps with a long list of `--set`: image, datasource URL, Redis host, read from Terraform outputs on the **laptop** | The GitHub runner has no Terraform state and shouldn't know the DB URL | Move the "infrastructure" part into a ConfigMap that `eks-up.sh` creates once; CI only sets the image |
-| 3 | Deploy = a bare `helm upgrade`, no waiting, no check | A broken deploy still shows CI green; pods CrashLoop silently | `--wait --rollback-on-failure` + a smoke test |
+| 1 | The `jaka-mod-gha-ci` role (week 13) only has ECR permissions | The deploy job can't reach the cluster | A new deploy-only role + an EKS access entry |
+| 2 | `eks-up.sh` deploys the apps with a long list of `--set`: image, datasource URL, Redis host, read from Terraform outputs on the **laptop** | The GitHub runner has no Terraform state and shouldn't know the DB URL | Move the "infrastructure" part into a ConfigMap that `eks-up.sh` creates once; the deploy job only sets the image |
+| 3 | Deploy = a bare `helm upgrade`, no waiting, no check | A broken deploy still shows the pipeline green; pods CrashLoop silently | `--wait --rollback-on-failure` + a smoke test |
 | 4 | The dev-eks cluster is **ephemeral**: most of the time it doesn't exist | Every push to master fails at the deploy step while the cluster is off | An `EKS_DEV_UP` switch (GitHub variable) to turn the deploy job on and off |
 
 > **Trade-off, stated up front:** the push-based model means GitHub holds access to the cluster (even if tightly scoped). It also means "the cluster's state" only exists in the history of workflow runs; nothing declares what the cluster *should* be running. Accept that this week; week 15 turns the model around.
@@ -175,7 +181,7 @@ Field by field:
 - `data "aws_iam_role"`: reads the role by **name** instead of hardcoding the account ARN into a public repo. Consequence: **`shared` must be applied before `dev-eks`** (the role must exist for the data source to read it). Remember this order every time you rebuild from scratch.
 - `type = "STANDARD"`: the entry type for a normal IAM role (other types like `EC2_LINUX` are for nodes).
 - `AmazonEKSEditPolicy`: an EKS-managed policy equivalent to Kubernetes' `edit` ClusterRole: create/update/delete Deployments, Services, ConfigMaps, Secrets..., but **not** RBAC and not nodes. Its siblings: `AmazonEKSViewPolicy` (read only), `AmazonEKSAdminPolicy` (admin of a namespace), `AmazonEKSClusterAdminPolicy` (whole cluster — the one you use yourself).
-- `access_scope namespace ["dev"]`: the second fence. Even with Edit, the role can only touch namespace `dev`. If CI were compromised, it still couldn't delete Strimzi in the `kafka` namespace or monitoring later on.
+- `access_scope namespace ["dev"]`: the second fence. Even with Edit, the role can only touch namespace `dev`. If the deploy role were compromised, it still couldn't delete Strimzi in the `kafka` namespace or monitoring later on.
 
 This file lives in `dev-eks`, so its **lifecycle follows the cluster**: destroying the cluster removes the entry too, leaving nothing behind. Whenever you build the cluster (`terraform apply` in `envs/dev-eks`), the entry is created automatically.
 
@@ -191,16 +197,16 @@ Open `scripts/eks-up.sh`. Step 9 (`# 9. App: ...`) runs `helm upgrade --install`
 - `env.SPRING_DATASOURCE_URL="jdbc:postgresql://$(pick "$db_hosts" "$svc"):5432/${svc}db?sslmode=require"`
 - for order and payment only (the `extra` array): `env.SPRING_DATA_REDIS_HOST="$redis_host"`
 
-`db_hosts` and `redis_host` come from `terraform -chdir=envs/dev-eks output` (lines 18 and 20). If CI did that, the GitHub runner would need to read Terraform state, which is both complex and grants extra access.
+`db_hosts` and `redis_host` come from `terraform -chdir=envs/dev-eks output` (lines 18 and 20). If the deploy job (CD) did that, the GitHub runner would need to read Terraform state, which is both complex and grants extra access.
 
 **New design: split the two kinds of config by lifecycle:**
 
 | Kind | Examples | Changes when | Provided by |
 |---|---|---|---|
 | **Infrastructure** config | `SPRING_DATASOURCE_URL`, `SPRING_DATA_REDIS_HOST` | The infrastructure is rebuilt | `eks-up.sh` creates a `<svc>-service-infra` ConfigMap once, when building the cluster |
-| **Release** config | `image.repository`, `image.tag` | Every deploy | CI/`deploy-service.sh` via `--set` |
+| **Release** config | `image.repository`, `image.tag` | Every deploy | The deploy job / `deploy-service.sh` via `--set` |
 
-The pod reads the ConfigMap through `envFrom`, so a CI deploy only needs to say "which image"; everything else is already in the cluster.
+The pod reads the ConfigMap through `envFrom`, so a deploy from GitHub Actions only needs to say "which image"; everything else is already in the cluster.
 
 ## B2. Update the chart `charts/spring-service`
 
@@ -265,14 +271,14 @@ done
 - `[[ ... ]] && args+=(...)` is the same pattern step 9 already uses for `extra`. Under `set -e`, a false `[[ ]]` on the left of `&&` doesn't stop the script.
 - The `--dry-run=client -o yaml | kubectl apply -f -` trick: running `kubectl create` a second time fails with "already exists"; piping it through `apply` makes it **idempotent**, so running it any number of times ends in the desired state. This pattern is used all over Kubernetes scripting.
 
-**Remove** these parts, which deploying from CI replaces:
+**Remove** these parts, which the pipeline now replaces (CI builds, CD deploys):
 
 | What | Where in `eks-up.sh` | Why it goes |
 |---|---|---|
 | `tag=${TAG:-eks-$(date +%s)}` | line 9 | nothing builds images here any more |
 | `ecr_urls=$(terraform -chdir=envs/shared output -json ecr_repository_urls)` | line 17 (as changed in week 13) | only steps 2 and 9 used it |
 | Step 2 (`# 2. image: build + push to ECR`): the `registry=...` line, `docker login`, and the build/push loop | lines 26–33 | CI builds and pushes now. It also stops the `eks-*` tags from week 13's leftover note |
-| Step 9 (`# 9. App: ...`): the `helm upgrade --install` loop | lines 90–100 | `deploy-service.sh` / CI deploys now |
+| Step 9 (`# 9. App: ...`): the `helm upgrade --install` loop | lines 90–100 | `deploy-service.sh` / the CD deploy job deploys now |
 
 From now on `eks-up.sh` only builds the *platform*: controllers, operators, secrets, the DB-role Jobs, Kafka, Mailpit, the infra ConfigMaps, and the gateway. Two side effects at the end of the script:
 - Step 10's `kubectl wait --for=condition=Available deploy --all -n dev` now only waits for `mailpit` (the only Deployment left in `dev`).
@@ -286,7 +292,7 @@ From now on `eks-up.sh` only builds the *platform*: controllers, operators, secr
 
 ## B4. The script `scripts/deploy-service.sh`
 
-One deploy script, shared by the laptop and CI (CI is just one way of calling it):
+One deploy script, shared by the laptop and the CD deploy job (the deploy job is just one way of calling it):
 
 ```bash
 #!/usr/bin/env bash
@@ -356,7 +362,7 @@ The decisions in the script:
 
 - `set -euo pipefail`: the standard opening of every script. Stop on any failing command (`-e`), treat undefined variables as errors (`-u`), don't swallow errors in the middle of a pipe (`pipefail`).
 - `${1:?...}` / `${REGISTRY:?...}`: bash prints the message and exits if the value is missing. "Fail early, fail clearly."
-- `REGISTRY` is an environment variable, not hardcoded, because the repo is **public** and the account ID must not be in the code. The laptop gets it from `terraform output ecr_registry`; CI computes it from the caller identity (C2).
+- `REGISTRY` is an environment variable, not hardcoded, because the repo is **public** and the account ID must not be in the code. The laptop gets it from `terraform output ecr_registry`; the deploy job computes it from the caller identity (C2).
 - `newest_tag()`: `describe-images` + `sort_by(imagePushedAt)[-1]` = the most recently pushed image. Used for "rebuild the cluster, deploy all 4 services at their latest version" without remembering any SHA.
 - `--wait`: helm waits until the Deployment is really ready (enough replicas passing the readiness probe) before returning 0. Without it, helm is "done" the moment it sends the YAML, and nobody notices a CrashLooping pod.
 - `--rollback-on-failure`: (Helm 4; replaces Helm 3's `--atomic`) if `--wait` times out or fails, helm **automatically goes back to the previous revision**. The cluster is never left half-deployed. Your local Helm is `v4.2.2`; `helm upgrade --help` lists the flag and notes that it turns on `--wait` (strategy `watcher`) by itself.
@@ -478,7 +484,7 @@ jobs:
 Explanation:
 
 - `workflow_call` with `inputs`: turns the workflow into a "function" with parameters. Note that `workflow_call` inputs only support `string/number/boolean`, no arrays, so `services` is a **JSON string** that's `fromJSON`-ed inside.
-- `if: vars.EKS_DEV_UP == 'true'`: the switch for the ephemeral cluster (problem #4). If the variable doesn't exist, the expression is an empty string ≠ 'true' → the job is skipped and CI stays green. Set it to `true` when the cluster is up; turn it off when you destroy it.
+- `if: vars.EKS_DEV_UP == 'true'`: the switch for the ephemeral cluster (problem #4). If the variable doesn't exist, the expression is an empty string ≠ 'true' → the deploy job is skipped and the run stays green. Set it to `true` when the cluster is up; turn it off when you destroy it.
 - `environment: dev`: the most important line in the file. Without it, the token's `sub` claim is `...:ref:refs/heads/master`, which **doesn't match** the `...:environment:dev` trust policy from A2 → AssumeRole fails. (On the first run, GitHub creates the `dev` environment in Settings automatically.)
 - `concurrency: deploy-dev-<svc>`: two deploys of **the same service** must not overlap (helm would fail with "another operation in progress"); different services still run in parallel.
 - Checkout `repository: ghtaidt9/jaka_infrastructure` into `path: infra`: the chart and script live in the infra repo; it's public (`https://api.github.com/repos/ghtaidt9/jaka_infrastructure` answers without a token), so checking it out needs no extra token. It reads GitHub's `master`; see the prerequisite at the top.
@@ -576,7 +582,7 @@ kubectl get pods -n dev
 
 ## D3. Drill 2 — manual rollback
 
-The real-world case: the deploy *succeeded*, but 10 minutes later you find a logic bug. CI can't help here; this is when you roll back by hand:
+The real-world case: the deploy *succeeded*, but 10 minutes later you find a logic bug. `--rollback-on-failure` can't help here (the deploy itself passed); this is when you roll back by hand:
 
 ```bash
 helm history order-service -n dev          # find the last good revision
@@ -598,7 +604,7 @@ kubectl delete ns kafka
 terraform -chdir=envs/dev-eks destroy -var-file terraform.tfvars
 ```
 
-- If you forget `EKS_DEV_UP=false`, every push to master fails its deploy job (the cluster is gone). Nothing breaks, but a red CI is annoying.
+- If you forget `EKS_DEV_UP=false`, every push to master fails its deploy job (the cluster is gone). Nothing breaks, but red runs on master are annoying.
 - The 3 `kubectl` lines are THANG-3 stage 18's teardown order. The NLB (created by the LB controller for the gateway) and Kafka's EBS volume (created through its PVC) are made by controllers inside the cluster, so Terraform doesn't know them. Delete them while the controllers still run. Otherwise they stay, cost money, and `destroy` fails with `DependencyViolation` on the VPC.
 - `envs/shared` **stays; don't destroy it**: ECR and the 2 roles cost almost nothing.
 
