@@ -31,6 +31,7 @@ dependencies {
 	testImplementation 'org.testcontainers:testcontainers-postgresql' 
 	testImplementation 'org.testcontainers:testcontainers-kafka'   // Testcontainers 2.x đổi tên artifact (trước là org.testcontainers:kafka)
 	runtimeOnly 'org.postgresql:postgresql'
+	runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
 
 	compileOnly 'org.projectlombok:lombok'
 	annotationProcessor 'org.projectlombok:lombok'

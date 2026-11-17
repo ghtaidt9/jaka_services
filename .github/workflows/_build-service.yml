@@ -89,3 +89,43 @@ jobs:
           cache-from: type=gha,scope=${{  inputs.service }}
           cache-to: type=gha,mode=max,scope=${{ inputs.service }}
           provenance: false
+  release:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-infra-${{ inputs.service }}
+    steps:
+      - name: Checkout infra repo (SSH, with write access)
+        uses: actions/checkout@v7
+        with:
+          repository: ghtaidt9/jaka_infrastructure
+          ref: master
+          ssh-key: ${{ secrets.INFRA_DEPLOY_KEY }}
+
+      - name: Bump image tag
+        env:
+          SERVICE: ${{ inputs.service }}
+          TAG: sha-${{ github.sha }}
+        run: |
+          yq -i ".image.tag = \"$TAG\"" "charts/spring-service/values/${SERVICE}-eks.yml"
+          echo "bump $SERVICE -> $TAG"
+      - name: Commit and push
+        env:
+          SERVICE: ${{ inputs.service }}
+          TAG: sha-${{ github.sha }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@user.noreply.github.com"
+          git add charts/spring-service/values
+          if git diff --cached --quiet; then
+            echo "Nothing changed (re-run?) - skipping."
+            exit 0
+          fi
+          git commit -m "release: $SERVICE -> $TAG"
+          for i in 1 2 3 4 5; do
+            if git push; then exit 0; fi
+            echo "Push failed (another service's release just landed?) - rebasing and retrying ($i/5)"
+            git pull -rebase
+          done
+          exit 1

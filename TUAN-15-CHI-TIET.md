@@ -228,7 +228,9 @@ for svc in order payment inventory notification; do gh workflow run "$svc-ci.yml
 
 ## C1. What ArgoCD is, in terms of a model you already know
 
-You understood the Kubernetes controller pattern in month 2: the *Deployment controller* constantly compares "desired pod count" with "actual pod count" and fixes the difference. **ArgoCD is the same pattern one level up**: it compares "desired state **in git**" with "actual state **in the cluster**" and fixes the difference (sync). Core concepts:
+Kubernetes runs on **controllers**: programs that loop forever, comparing the *desired* state (the `spec` you applied, stored in etcd) with the *actual* state, and acting to close the gap. This loop is called **reconcile**. You've relied on it since month 2 without it being named: delete an order-service pod and it comes back, because the *Deployment controller* sees "want 1, have 0" and creates one. Your add-ons work the same way: ESO turns an `ExternalSecret` into a Secret, the LB controller turns the Envoy Service into an NLB, and Strimzi turns the `Kafka` resource into pods.
+
+**ArgoCD is the same pattern one level up**: it compares "desired state **in git**" with "actual state **in the cluster**" and fixes the difference (sync). Core concepts:
 
 - **Application** (CRD): one "watched" unit: *which repo + which path + how to render it (helm/kustomize) + which target cluster/namespace*. Each of your services will be one Application.
 - **ApplicationSet** (CRD): a factory that stamps out Applications from a template + a list of parameters. Your 4 services are identical except for the name → 1 ApplicationSet instead of 4 hand-copied Application files.
@@ -250,7 +252,7 @@ configs:
 
 - `dex.enabled: false`: Dex is the SSO layer (login via Google/GitHub...). The built-in admin account is enough for a learning environment; turn it off to keep the cluster light.
 - `notifications.enabled: false`: the controller that sends Slack/email notifications on sync; not needed yet.
-- `server.insecure: true`: the ArgoCD server uses a self-signed TLS cert. We reach the UI through `kubectl port-forward` (an already-encrypted channel), so letting the server speak plain HTTP avoids browser certificate warnings. **Don't** do this if you ever expose ArgoCD publicly.
+- `server.insecure: true`: the ArgoCD server uses a self-signed TLS cert. We reach the UI through `kubectl port-forward` (an already-encrypted channel), so letting the server speak plain HTTP avoids browser certificate warnings. If you ever expose ArgoCD publicly, **never** do it without TLS in front: put a real certificate on the gateway/ingress (for example from ACM), which terminates TLS and forwards plain HTTP to the server. That's the standard production setup, and it keeps `server.insecure: true`. Exposing the plain-HTTP server directly would send the admin password over the internet unencrypted.
 
 ## C3. Install it from `eks-up.sh`
 
@@ -263,7 +265,7 @@ helm upgrade --install argocd argo/argo-cd --version 10.17.2 \
 ```
 
 - `--version 10.17.2`: **always pin the chart version** (`helm show chart` for 10.17.2 reports `appVersion: v3.6.1`). Without a pin, every cluster build gets a different version and nothing is reproducible.
-- The chart's `values.yaml` sets `nameOverride: argocd`, so the Services get short names like `argocd-server`, `argocd-repo-server`... in namespace `argocd`.
+- Service names come from the **release name** (`argocd`, the first argument after `helm upgrade --install`) combined with the chart's `nameOverride: argocd` (in its `values.yaml`). When the release name already contains `argocd`, the chart uses it alone, so you get short names like `argocd-server`, `argocd-repo-server`... in namespace `argocd`. With a release named `foo`, they would be `foo-argocd-server`... C5's `port-forward svc/argocd-server` relies on the release being called exactly `argocd`.
 
 ## C4. ApplicationSet — `k8s/argocd/applicationset.yml.tpl`
 
@@ -331,7 +333,7 @@ REGISTRY=$(terraform -chdir=envs/shared output -raw ecr_registry) \
     envsubst '${REGISTRY}' < k8s/argocd/applicationset.yml.tpl | kubectl apply -f -
 ```
 
-- `envsubst '${REGISTRY}'` substitutes **only that one variable**; the argument list keeps envsubst from touching the `{{.svc}}` placeholders in the file. The same pattern is in step 6 (`envsubst '${SVC} ${ADMIN_SECRET_ARN}'`).
+- `envsubst '${REGISTRY}'` substitutes **only that one variable**. envsubst only acts on `$VAR` / `${VAR}`, so the `{{.svc}}` placeholders are never touched either way. Without the argument list, though, it replaces **every** `$something` in the file with that environment variable's value, or with an empty string if it isn't set. Today `${REGISTRY}` is the only `$` in the file, so the list is protection for later: any `$` added afterwards stays literal. The same pattern is in step 6 (`envsubst '${SVC} ${ADMIN_SECRET_ARN}'`).
 - `REGISTRY=... envsubst ...` sets the variable for that one command only, so no `export` is needed.
 - Step 10's `kubectl wait --for=condition=Available deploy --all -n dev` may now run before ArgoCD has created the 4 Deployments (sync is asynchronous). In that case it only waits for `mailpit`. Watch the apps in the ArgoCD UI (C5) instead.
 
